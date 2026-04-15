@@ -7,6 +7,221 @@
  */
 
 /**
+ * Parses the plugin contents to retrieve plugin's metadata.
+ *
+ * All plugin headers must be on their own line. Plugin description must not have
+ * any newlines, otherwise only parts of the description will be displayed.
+ * The below is formatted for printing.
+ *
+ *     /*
+ *     Plugin Name: Name of the plugin.
+ *     Plugin URI: The home page of the plugin.
+ *     Description: Plugin description.
+ *     Author: Plugin author's name.
+ *     Author URI: Link to the author's website.
+ *     Version: Plugin version.
+ *     Text Domain: Optional. Unique identifier, should be same as the one used in
+ *          load_plugin_textdomain().
+ *     Domain Path: Optional. Only useful if the translations are located in a
+ *          folder above the plugin's base path. For example, if .mo files are
+ *          located in the locale folder then Domain Path will be "/locale/" and
+ *          must have the first slash. Defaults to the base folder the plugin is
+ *          located in.
+ *     Network: Optional. Specify "Network: true" to require that a plugin is activated
+ *          across all sites in an installation. This will prevent a plugin from being
+ *          activated on a single site when Multisite is enabled.
+ *     Requires at least: Optional. Specify the minimum required WordPress version.
+ *     Requires PHP: Optional. Specify the minimum required PHP version.
+ *     * / # Remove the space to close comment.
+ *
+ * The first 8 KB of the file will be pulled in and if the plugin data is not
+ * within that first 8 KB, then the plugin author should correct their plugin
+ * and move the plugin data headers to the top.
+ *
+ * The plugin file is assumed to have permissions to allow for scripts to read
+ * the file. This is not checked however and the file is only opened for
+ * reading.
+ *
+ * @since 1.5.0
+ * @since 5.3.0 Added support for `Requires at least` and `Requires PHP` headers.
+ * @since 5.8.0 Added support for `Update URI` header.
+ * @since 6.5.0 Added support for `Requires Plugins` header.
+ *
+ * @param string $plugin_file Absolute path to the main plugin file.
+ * @param bool   $markup      Optional. If the returned data should have HTML markup applied.
+ *                            Default true.
+ * @param bool   $translate   Optional. If the returned data should be translated. Default true.
+ * @return array {
+ *     Plugin data. Values will be empty if not supplied by the plugin.
+ *
+ *     @type string $Name            Name of the plugin. Should be unique.
+ *     @type string $PluginURI       Plugin URI.
+ *     @type string $Version         Plugin version.
+ *     @type string $Description     Plugin description.
+ *     @type string $Author          Plugin author's name.
+ *     @type string $AuthorURI       Plugin author's website address (if set).
+ *     @type string $TextDomain      Plugin textdomain.
+ *     @type string $DomainPath      Plugin's relative directory path to .mo files.
+ *     @type bool   $Network         Whether the plugin can only be activated network-wide.
+ *     @type string $RequiresWP      Minimum required version of WordPress.
+ *     @type string $RequiresPHP     Minimum required version of PHP.
+ *     @type string $UpdateURI       ID of the plugin for update purposes, should be a URI.
+ *     @type string $RequiresPlugins Comma separated list of dot org plugin slugs.
+ *     @type string $Title           Title of the plugin and link to the plugin's site (if set).
+ *     @type string $AuthorName      Plugin author's name.
+ * }
+ */
+function get_plugin_data( $plugin_file, $markup = true, $translate = true ) {
+
+	$default_headers = array(
+		'Name'            => 'Plugin Name',
+		'PluginURI'       => 'Plugin URI',
+		'Version'         => 'Version',
+		'Description'     => 'Description',
+		'Author'          => 'Author',
+		'AuthorURI'       => 'Author URI',
+		'TextDomain'      => 'Text Domain',
+		'DomainPath'      => 'Domain Path',
+		'Network'         => 'Network',
+		'RequiresWP'      => 'Requires at least',
+		'RequiresPHP'     => 'Requires PHP',
+		'UpdateURI'       => 'Update URI',
+		'RequiresPlugins' => 'Requires Plugins',
+		// Site Wide Only is deprecated in favor of Network.
+		'_sitewide'       => 'Site Wide Only',
+	);
+
+	$plugin_data = get_file_data( $plugin_file, $default_headers, 'plugin' );
+
+	// Site Wide Only is the old header for Network.
+	if ( ! $plugin_data['Network'] && $plugin_data['_sitewide'] ) {
+		/* translators: 1: Site Wide Only: true, 2: Network: true */
+		_deprecated_argument( __FUNCTION__, '3.0.0', sprintf( __( 'The %1$s plugin header is deprecated. Use %2$s instead.' ), '<code>Site Wide Only: true</code>', '<code>Network: true</code>' ) );
+		$plugin_data['Network'] = $plugin_data['_sitewide'];
+	}
+	$plugin_data['Network'] = ( 'true' === strtolower( $plugin_data['Network'] ) );
+	unset( $plugin_data['_sitewide'] );
+
+	// If no text domain is defined fall back to the plugin slug.
+	if ( ! $plugin_data['TextDomain'] ) {
+		$plugin_slug = dirname( plugin_basename( $plugin_file ) );
+		if ( '.' !== $plugin_slug && ! str_contains( $plugin_slug, '/' ) ) {
+			$plugin_data['TextDomain'] = $plugin_slug;
+		}
+	}
+
+	if ( $markup || $translate ) {
+		$plugin_data = _get_plugin_data_markup_translate( $plugin_file, $plugin_data, $markup, $translate );
+	} else {
+		$plugin_data['Title']      = $plugin_data['Name'];
+		$plugin_data['AuthorName'] = $plugin_data['Author'];
+	}
+
+	return $plugin_data;
+}
+
+/**
+ * Sanitizes plugin data, optionally adds markup, optionally translates.
+ *
+ * @since 2.7.0
+ *
+ * @see get_plugin_data()
+ *
+ * @access private
+ *
+ * @param string $plugin_file Path to the main plugin file.
+ * @param array  $plugin_data An array of plugin data. See get_plugin_data().
+ * @param bool   $markup      Optional. If the returned data should have HTML markup applied.
+ *                            Default true.
+ * @param bool   $translate   Optional. If the returned data should be translated. Default true.
+ * @return array Plugin data. Values will be empty if not supplied by the plugin.
+ *               See get_plugin_data() for the list of possible values.
+ */
+function _get_plugin_data_markup_translate( $plugin_file, $plugin_data, $markup = true, $translate = true ) {
+
+	// Sanitize the plugin filename to a WP_PLUGIN_DIR relative path.
+	$plugin_file = plugin_basename( $plugin_file );
+
+	// Translate fields.
+	if ( $translate ) {
+		$textdomain = $plugin_data['TextDomain'];
+		if ( $textdomain ) {
+			if ( ! is_textdomain_loaded( $textdomain ) ) {
+				if ( $plugin_data['DomainPath'] ) {
+					load_plugin_textdomain( $textdomain, false, dirname( $plugin_file ) . $plugin_data['DomainPath'] );
+				} else {
+					load_plugin_textdomain( $textdomain, false, dirname( $plugin_file ) );
+				}
+			}
+		} elseif ( 'hello.php' === basename( $plugin_file ) ) {
+			$textdomain = 'default';
+		}
+		if ( $textdomain ) {
+			foreach ( array( 'Name', 'PluginURI', 'Description', 'Author', 'AuthorURI', 'Version' ) as $field ) {
+				if ( ! empty( $plugin_data[ $field ] ) ) {
+					// phpcs:ignore WordPress.WP.I18n.LowLevelTranslationFunction,WordPress.WP.I18n.NonSingularStringLiteralText,WordPress.WP.I18n.NonSingularStringLiteralDomain
+					$plugin_data[ $field ] = translate( $plugin_data[ $field ], $textdomain );
+				}
+			}
+		}
+	}
+
+	// Sanitize fields.
+	$allowed_tags_in_links = array(
+		'abbr'    => array( 'title' => true ),
+		'acronym' => array( 'title' => true ),
+		'code'    => true,
+		'em'      => true,
+		'strong'  => true,
+	);
+
+	$allowed_tags      = $allowed_tags_in_links;
+	$allowed_tags['a'] = array(
+		'href'  => true,
+		'title' => true,
+	);
+
+	/*
+	 * Name is marked up inside <a> tags. Don't allow these.
+	 * Author is too, but some plugins have used <a> here (omitting Author URI).
+	 */
+	$plugin_data['Name']   = wp_kses( $plugin_data['Name'], $allowed_tags_in_links );
+	$plugin_data['Author'] = wp_kses( $plugin_data['Author'], $allowed_tags );
+
+	$plugin_data['Description'] = wp_kses( $plugin_data['Description'], $allowed_tags );
+	$plugin_data['Version']     = wp_kses( $plugin_data['Version'], $allowed_tags );
+
+	$plugin_data['PluginURI'] = esc_url( $plugin_data['PluginURI'] );
+	$plugin_data['AuthorURI'] = esc_url( $plugin_data['AuthorURI'] );
+
+	$plugin_data['Title']      = $plugin_data['Name'];
+	$plugin_data['AuthorName'] = $plugin_data['Author'];
+
+	// Apply markup.
+	if ( $markup ) {
+		if ( $plugin_data['PluginURI'] && $plugin_data['Name'] ) {
+			$plugin_data['Title'] = '<a href="' . $plugin_data['PluginURI'] . '">' . $plugin_data['Name'] . '</a>';
+		}
+
+		if ( $plugin_data['AuthorURI'] && $plugin_data['Author'] ) {
+			$plugin_data['Author'] = '<a href="' . $plugin_data['AuthorURI'] . '">' . $plugin_data['Author'] . '</a>';
+		}
+
+		$plugin_data['Description'] = wptexturize( $plugin_data['Description'] );
+
+		if ( $plugin_data['Author'] ) {
+			$plugin_data['Description'] .= sprintf(
+				/* translators: %s: Plugin author. */
+				' <cite>' . __( 'By %s.' ) . '</cite>',
+				$plugin_data['Author']
+			);
+		}
+	}
+
+	return $plugin_data;
+}
+
+/**
  * Gets a list of a plugin's files.
  *
  * @since 2.8.0
@@ -711,7 +926,7 @@ function delete_plugins( $plugins, $deprecated = '' ) {
 			require_once ABSPATH . 'wp-admin/admin-footer.php';
 			exit;
 		}
-		return;
+		return null;
 	}
 
 	if ( ! WP_Filesystem( $credentials ) ) {
@@ -726,7 +941,7 @@ function delete_plugins( $plugins, $deprecated = '' ) {
 			require_once ABSPATH . 'wp-admin/admin-footer.php';
 			exit;
 		}
-		return;
+		return null;
 	}
 
 	if ( ! is_object( $wp_filesystem ) ) {
@@ -1038,7 +1253,20 @@ function validate_plugin_requirements( $plugin ) {
 		);
 	}
 
-	return true;
+	/**
+	 * Filters the plugin requirement validation response.
+	 *
+	 * If a plugin fails due to a Core-provided validation (incompatible WP, PHP versions), this
+	 * filter will not fire. A WP_Error response will already be returned.
+	 *
+	 * This filter is intended to add additional validation steps by site administrators.
+	 *
+	 * @since 6.9.0
+	 *
+	 * @param bool|WP_Error $met_requirements True if the plugin meets requirements, WP_Error if not.
+	 * @param string $plugin Path to the plugin file relative to the plugins directory.
+	 */
+	return apply_filters( 'validate_plugin_requirements', true, $plugin );
 }
 
 /**
@@ -1068,8 +1296,8 @@ function is_uninstallable_plugin( $plugin ) {
  * @since 2.7.0
  *
  * @param string $plugin Path to the plugin file relative to the plugins directory.
- * @return true|void True if a plugin's uninstall.php file has been found and included.
- *                   Void otherwise.
+ * @return true|null True if a plugin's uninstall.php file has been found and included.
+ *                   Null otherwise.
  */
 function uninstall_plugin( $plugin ) {
 	$file = plugin_basename( $plugin );
@@ -1122,6 +1350,7 @@ function uninstall_plugin( $plugin ) {
 		 */
 		do_action( "uninstall_{$file}" );
 	}
+	return null;
 }
 
 //
@@ -1199,7 +1428,7 @@ function add_menu_page( $page_title, $menu_title, $capability, $menu_slug, $call
 	if ( null === $position || ! is_numeric( $position ) ) {
 		$menu[] = $new_menu;
 	} elseif ( isset( $menu[ (string) $position ] ) ) {
-		$collision_avoider = base_convert( substr( md5( $menu_slug . $menu_title ), -4 ), 16, 10 ) * 0.00001;
+		$collision_avoider = (int) base_convert( substr( md5( $menu_slug . $menu_title ), -4 ), 16, 10 ) * 0.00001;
 		$position          = (string) ( $position + $collision_avoider );
 		$menu[ $position ] = $new_menu;
 	} else {
@@ -1743,44 +1972,25 @@ function get_admin_page_parent( $parent_page = '' ) {
 		$plugin_page, $_wp_real_parent_file, $_wp_menu_nopriv, $_wp_submenu_nopriv;
 
 	if ( ! empty( $parent_page ) && 'admin.php' !== $parent_page ) {
-		if ( isset( $_wp_real_parent_file[ $parent_page ] ) ) {
-			$parent_page = $_wp_real_parent_file[ $parent_page ];
-		}
-
-		return $parent_page;
+		return $_wp_real_parent_file[ $parent_page ] ?? $parent_page;
 	}
 
 	if ( 'admin.php' === $pagenow && isset( $plugin_page ) ) {
 		foreach ( (array) $menu as $parent_menu ) {
 			if ( $parent_menu[2] === $plugin_page ) {
 				$parent_file = $plugin_page;
-
-				if ( isset( $_wp_real_parent_file[ $parent_file ] ) ) {
-					$parent_file = $_wp_real_parent_file[ $parent_file ];
-				}
-
-				return $parent_file;
+				return $_wp_real_parent_file[ $parent_file ] ?? $parent_file;
 			}
 		}
 		if ( isset( $_wp_menu_nopriv[ $plugin_page ] ) ) {
 			$parent_file = $plugin_page;
-
-			if ( isset( $_wp_real_parent_file[ $parent_file ] ) ) {
-					$parent_file = $_wp_real_parent_file[ $parent_file ];
-			}
-
-			return $parent_file;
+			return $_wp_real_parent_file[ $parent_file ] ?? $parent_file;
 		}
 	}
 
 	if ( isset( $plugin_page ) && isset( $_wp_submenu_nopriv[ $pagenow ][ $plugin_page ] ) ) {
 		$parent_file = $pagenow;
-
-		if ( isset( $_wp_real_parent_file[ $parent_file ] ) ) {
-			$parent_file = $_wp_real_parent_file[ $parent_file ];
-		}
-
-		return $parent_file;
+		return $_wp_real_parent_file[ $parent_file ] ?? $parent_file;
 	}
 
 	foreach ( array_keys( (array) $submenu ) as $parent_page ) {
@@ -2048,7 +2258,7 @@ function user_can_access_admin_page() {
  * @global array $new_allowed_options
  *
  * @param array $options
- * @return array
+ * @return array Updated allowed options.
  */
 function option_update_filter( $options ) {
 	global $new_allowed_options;
@@ -2069,7 +2279,7 @@ function option_update_filter( $options ) {
  *
  * @param array        $new_options
  * @param string|array $options
- * @return array
+ * @return array Updated allowed options.
  */
 function add_allowed_options( $new_options, $options = '' ) {
 	if ( '' === $options ) {
@@ -2104,7 +2314,7 @@ function add_allowed_options( $new_options, $options = '' ) {
  *
  * @param array        $del_options
  * @param string|array $options
- * @return array
+ * @return array Updated allowed options.
  */
 function remove_allowed_options( $del_options, $options = '' ) {
 	if ( '' === $options ) {
